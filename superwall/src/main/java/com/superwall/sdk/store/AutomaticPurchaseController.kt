@@ -375,10 +375,9 @@ class AutomaticPurchaseController(
         Superwall.instance.internallySetSubscriptionStatus(status)
     }
 
-    // Play rejects a second base plan of an owned subscription, and bills twice for a
-    // different product, unless the purchase names the subscription it replaces.
-    // Same product first: Play only rejects when that one is owned. A failed query
-    // yields no purchases, so the flow falls back to a plain purchase.
+    // Play rejects buying another base plan of an owned subscription unless the purchase
+    // names the one it replaces. Other products are left alone. A failed query yields
+    // no purchases, so the flow falls back to a plain purchase.
     private suspend fun activeSubscriptionToken(productId: String): String? {
         val deferred = CompletableDeferred<String?>()
 
@@ -389,8 +388,11 @@ class AutomaticPurchaseController(
                 .build()
 
         billingClient.queryPurchasesAsync(params) { _, purchasesList ->
-            val active = purchasesList.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
-            deferred.complete((active.firstOrNull { productId in it.products } ?: active.firstOrNull())?.purchaseToken)
+            deferred.complete(
+                purchasesList
+                    .firstOrNull { it.purchaseState == Purchase.PurchaseState.PURCHASED && productId in it.products }
+                    ?.purchaseToken,
+            )
         }
 
         return deferred.await()
