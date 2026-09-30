@@ -247,7 +247,11 @@ class AutomaticPurchaseController(
         )
 
         val oldPurchaseToken =
-            if (productDetails.productType == BillingClient.ProductType.SUBS) activeSubscriptionToken() else null
+            if (productDetails.productType == BillingClient.ProductType.SUBS) {
+                activeSubscriptionToken(productDetails.productId)
+            } else {
+                null
+            }
 
         val flowParams =
             BillingFlowParams
@@ -259,6 +263,8 @@ class AutomaticPurchaseController(
                             BillingFlowParams.SubscriptionUpdateParams
                                 .newBuilder()
                                 .setOldPurchaseToken(it)
+                                // New plan starts now at full price; the old plan's unused time is
+                                // credited on it, so no paid value is lost on an upgrade or a downgrade.
                                 .setSubscriptionReplacementMode(
                                     BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE,
                                 ).build(),
@@ -371,8 +377,9 @@ class AutomaticPurchaseController(
 
     // Play rejects a second base plan of an owned subscription, and bills twice for a
     // different product, unless the purchase names the subscription it replaces.
-    // A failed query yields no purchases, so the flow falls back to a plain purchase.
-    private suspend fun activeSubscriptionToken(): String? {
+    // Same product first: Play only rejects when that one is owned. A failed query
+    // yields no purchases, so the flow falls back to a plain purchase.
+    private suspend fun activeSubscriptionToken(productId: String): String? {
         val deferred = CompletableDeferred<String?>()
 
         val params =
@@ -382,9 +389,8 @@ class AutomaticPurchaseController(
                 .build()
 
         billingClient.queryPurchasesAsync(params) { _, purchasesList ->
-            deferred.complete(
-                purchasesList.firstOrNull { it.purchaseState == Purchase.PurchaseState.PURCHASED }?.purchaseToken,
-            )
+            val active = purchasesList.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
+            deferred.complete((active.firstOrNull { productId in it.products } ?: active.firstOrNull())?.purchaseToken)
         }
 
         return deferred.await()
