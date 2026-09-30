@@ -231,14 +231,6 @@ class AutomaticPurchaseController(
                 )
                 null
             }
-        val flowParams =
-            BillingFlowParams
-                .newBuilder()
-                .apply {
-                    setObfuscatedAccountId(Superwall.instance.externalAccountId)
-                }.setProductDetailsParamsList(listOf(productDetailsParams))
-                .build()
-
         Logger.debug(
             logLevel = LogLevel.info,
             scope = LogScope.nativePurchaseController,
@@ -253,6 +245,33 @@ class AutomaticPurchaseController(
             scope = LogScope.nativePurchaseController,
             message = "Billing client is connected",
         )
+
+        val oldPurchaseToken =
+            if (productDetails.productType == BillingClient.ProductType.SUBS) {
+                activeSubscriptionToken(productDetails.productId)
+            } else {
+                null
+            }
+
+        val flowParams =
+            BillingFlowParams
+                .newBuilder()
+                .apply {
+                    setObfuscatedAccountId(Superwall.instance.externalAccountId)
+                    oldPurchaseToken?.let {
+                        setSubscriptionUpdateParams(
+                            BillingFlowParams.SubscriptionUpdateParams
+                                .newBuilder()
+                                .setOldPurchaseToken(it)
+                                // New plan starts now at full price; the old plan's unused time is
+                                // credited on it, so no paid value is lost on an upgrade or a downgrade.
+                                .setSubscriptionReplacementMode(
+                                    BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE,
+                                ).build(),
+                        )
+                    }
+                }.setProductDetailsParamsList(listOf(productDetailsParams))
+                .build()
 
         billingClient.launchBillingFlow(activity, flowParams)
 
@@ -354,6 +373,29 @@ class AutomaticPurchaseController(
         }
 
         Superwall.instance.internallySetSubscriptionStatus(status)
+    }
+
+    // Play rejects buying another base plan of an owned subscription unless the purchase
+    // names the one it replaces. Other products are left alone. A failed query yields
+    // no purchases, so the flow falls back to a plain purchase.
+    private suspend fun activeSubscriptionToken(productId: String): String? {
+        val deferred = CompletableDeferred<String?>()
+
+        val params =
+            QueryPurchasesParams
+                .newBuilder()
+                .setProductType(BillingClient.ProductType.SUBS)
+                .build()
+
+        billingClient.queryPurchasesAsync(params) { _, purchasesList ->
+            deferred.complete(
+                purchasesList
+                    .firstOrNull { it.purchaseState == Purchase.PurchaseState.PURCHASED && productId in it.products }
+                    ?.purchaseToken,
+            )
+        }
+
+        return deferred.await()
     }
 
     private suspend fun queryPurchasesOfType(productType: String): List<Purchase> {
