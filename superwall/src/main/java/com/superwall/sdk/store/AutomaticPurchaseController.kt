@@ -246,9 +246,9 @@ class AutomaticPurchaseController(
             message = "Billing client is connected",
         )
 
-        val oldPurchaseToken =
+        val oldPurchase =
             if (productDetails.productType == BillingClient.ProductType.SUBS) {
-                activeSubscriptionToken(productDetails.productId)
+                activeSubscription(productDetails.productId)
             } else {
                 null
             }
@@ -258,15 +258,20 @@ class AutomaticPurchaseController(
                 .newBuilder()
                 .apply {
                     setObfuscatedAccountId(Superwall.instance.externalAccountId)
-                    oldPurchaseToken?.let {
+                    oldPurchase?.let {
                         setSubscriptionUpdateParams(
                             BillingFlowParams.SubscriptionUpdateParams
                                 .newBuilder()
-                                .setOldPurchaseToken(it)
-                                // New plan starts now at full price; the old plan's unused time is
-                                // credited on it, so no paid value is lost on an upgrade or a downgrade.
+                                .setOldPurchaseToken(it.purchaseToken)
+                                // Same product: Play only accepts full price or no proration, and full
+                                // price credits the unused time. Another product: charge only the
+                                // difference for the remaining period, keeping the renewal date.
                                 .setSubscriptionReplacementMode(
-                                    BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE,
+                                    if (productDetails.productId in it.products) {
+                                        BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE
+                                    } else {
+                                        BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_PRORATED_PRICE
+                                    },
                                 ).build(),
                         )
                     }
@@ -375,11 +380,11 @@ class AutomaticPurchaseController(
         Superwall.instance.internallySetSubscriptionStatus(status)
     }
 
-    // Play rejects buying another base plan of an owned subscription unless the purchase
-    // names the one it replaces. Other products are left alone. A failed query yields
-    // no purchases, so the flow falls back to a plain purchase.
-    private suspend fun activeSubscriptionToken(productId: String): String? {
-        val deferred = CompletableDeferred<String?>()
+    // Play rejects buying another base plan of an owned subscription, and bills twice for
+    // another product, unless the purchase names the one it replaces. Same product first.
+    // A failed query yields no purchases, so the flow falls back to a plain purchase.
+    private suspend fun activeSubscription(productId: String): Purchase? {
+        val deferred = CompletableDeferred<Purchase?>()
 
         val params =
             QueryPurchasesParams
@@ -388,11 +393,8 @@ class AutomaticPurchaseController(
                 .build()
 
         billingClient.queryPurchasesAsync(params) { _, purchasesList ->
-            deferred.complete(
-                purchasesList
-                    .firstOrNull { it.purchaseState == Purchase.PurchaseState.PURCHASED && productId in it.products }
-                    ?.purchaseToken,
-            )
+            val active = purchasesList.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
+            deferred.complete(active.firstOrNull { productId in it.products } ?: active.firstOrNull())
         }
 
         return deferred.await()
