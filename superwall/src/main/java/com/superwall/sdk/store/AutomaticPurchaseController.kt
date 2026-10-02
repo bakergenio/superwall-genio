@@ -390,9 +390,8 @@ class AutomaticPurchaseController(
     }
 
     // Play rejects buying another base plan of an owned subscription, and bills twice for
-    // another product, unless the purchase names the one it replaces. Same product first;
-    // another product only when it is the single active one, so the choice is never arbitrary.
-    // A failed query yields no purchases, so the flow falls back to a plain purchase.
+    // another product, unless the purchase names the one it replaces. A failed query
+    // yields no purchases, so the flow falls back to a plain purchase.
     private suspend fun activeSubscription(productId: String): Purchase? {
         val deferred = CompletableDeferred<Purchase?>()
 
@@ -403,8 +402,7 @@ class AutomaticPurchaseController(
                 .build()
 
         billingClient.queryPurchasesAsync(params) { _, purchasesList ->
-            val active = purchasesList.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
-            deferred.complete(active.firstOrNull { productId in it.products } ?: active.singleOrNull())
+            deferred.complete(replacedPurchase(purchasesList, productId))
         }
 
         return deferred.await()
@@ -457,6 +455,16 @@ class AutomaticPurchaseController(
     }
 
 //endregion
+}
+
+// The purchase to replace: an active one of the same product first; another product only
+// when it is the single active subscription, so the choice is never arbitrary.
+internal fun replacedPurchase(
+    purchases: List<Purchase>,
+    productId: String,
+): Purchase? {
+    val active = purchases.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
+    return active.firstOrNull { productId in it.products } ?: active.singleOrNull()
 }
 
 // Same product: Play only accepts full price or no proration, and full price credits the
