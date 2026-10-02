@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.math.BigDecimal
 import kotlin.math.min
 
 private val BILLING_INSANTIATION_ERROR =
@@ -252,6 +253,13 @@ class AutomaticPurchaseController(
             } else {
                 null
             }
+        val sameProduct = oldPurchase?.products?.contains(productDetails.productId) == true
+        val mode =
+            replacementMode(
+                sameProduct = sameProduct,
+                newPricePerDay = rawStoreProduct.subscriptionPeriod?.pricePerDay(rawStoreProduct.price),
+                currentPricePerDay = if (oldPurchase == null || sameProduct) null else currentPlanPricePerDay(oldPurchase),
+            )
 
         val flowParams =
             BillingFlowParams
@@ -263,16 +271,8 @@ class AutomaticPurchaseController(
                             BillingFlowParams.SubscriptionUpdateParams
                                 .newBuilder()
                                 .setOldPurchaseToken(it.purchaseToken)
-                                // Same product: Play only accepts full price or no proration, and full
-                                // price credits the unused time. Another product: charge only the
-                                // difference for the remaining period, keeping the renewal date.
-                                .setSubscriptionReplacementMode(
-                                    if (productDetails.productId in it.products) {
-                                        BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE
-                                    } else {
-                                        BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_PRORATED_PRICE
-                                    },
-                                ).build(),
+                                .setSubscriptionReplacementMode(mode)
+                                .build(),
                         )
                     }
                 }.setProductDetailsParamsList(listOf(productDetailsParams))
@@ -380,8 +380,18 @@ class AutomaticPurchaseController(
         Superwall.instance.internallySetSubscriptionStatus(status)
     }
 
+    // Play purchases don't say which base plan they are on. The app mirrors the current
+    // plan's full id (e.g. "lite:lite1month-promo:sw-auto") in the `productId` attribute.
+    private suspend fun currentPlanPricePerDay(purchase: Purchase): BigDecimal? {
+        val planId = Superwall.instance.userAttributes["productId"] as? String ?: return null
+        if (planId.substringBefore(":") !in purchase.products) return null
+        val plan = Superwall.instance.getProducts(planId).getOrNull()?.get(planId) ?: return null
+        return plan.subscriptionPeriod?.pricePerDay(plan.price)
+    }
+
     // Play rejects buying another base plan of an owned subscription, and bills twice for
-    // another product, unless the purchase names the one it replaces. Same product first.
+    // another product, unless the purchase names the one it replaces. Same product first;
+    // another product only when it is the single active one, so the choice is never arbitrary.
     // A failed query yields no purchases, so the flow falls back to a plain purchase.
     private suspend fun activeSubscription(productId: String): Purchase? {
         val deferred = CompletableDeferred<Purchase?>()
@@ -394,7 +404,7 @@ class AutomaticPurchaseController(
 
         billingClient.queryPurchasesAsync(params) { _, purchasesList ->
             val active = purchasesList.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
-            deferred.complete(active.firstOrNull { productId in it.products } ?: active.firstOrNull())
+            deferred.complete(active.firstOrNull { productId in it.products } ?: active.singleOrNull())
         }
 
         return deferred.await()
@@ -448,3 +458,18 @@ class AutomaticPurchaseController(
 
 //endregion
 }
+
+// Same product: Play only accepts full price or no proration, and full price credits the
+// unused time. Another product: charge only the difference for the remaining period, which
+// Play allows only when the price per day goes up; otherwise, or when either price is
+// unknown, fall back to full price.
+internal fun replacementMode(
+    sameProduct: Boolean,
+    newPricePerDay: BigDecimal?,
+    currentPricePerDay: BigDecimal?,
+): Int =
+    if (!sameProduct && newPricePerDay != null && currentPricePerDay != null && newPricePerDay > currentPricePerDay) {
+        BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_PRORATED_PRICE
+    } else {
+        BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE
+    }
